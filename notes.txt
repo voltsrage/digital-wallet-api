@@ -1,0 +1,5 @@
+`decimal.js` is installed now even though it is not used until Phase 5. Financial arithmetic must never touch JavaScript's native `Number` — install the dependency once and form the habit early.
+
+Creating tables
+npm run migrate:make create_users
+npm run migrate:make create_accounts
