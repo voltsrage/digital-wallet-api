@@ -59,11 +59,10 @@ auditEventSchema.index({targetId: 1, createdAt: -1});
 auditEventSchema.index({eventType: 1, createdAt: -1});
 
 // Immutability enforcement - these hooks fire before the database operation.
-auditEventSchema.pre('save', function(next){
+auditEventSchema.pre('save', async function(){
     if(!this.isNew){
-        return next(new Error('AuditEvent is immutable and cannot be updated.'));
+        throw new Error('AuditEvent is immutable and cannot be updated.');
     }
-    next();
 });
 
 // Prevent deletion of individual documents

@@ -7,6 +7,7 @@ import {errorHandler} from './middleware/errorHandler.js';
 import { ApiResponse } from './utils/ApiResponse.js';
 import {swaggerRouter} from './swagger.js';
 
+
 export const app = express();
 
 // 1. Request logging — first so every request is captured, including those that fail body parsing
@@ -24,7 +25,8 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 // Routes are mounted in later phases:
-// app.use('/api/v1/auth',     authRouter);
+import { authRouter } from './routes/auth.js';
+app.use('/api/v1/auth', authRouter)
 // app.use('/api/v1/accounts', accountsRouter);
 // app.use('/api/v1/transfers', transfersRouter);
 

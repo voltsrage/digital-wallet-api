@@ -8,7 +8,7 @@ import { logger } from './utils/logger.js';
 const PORT =  process.env.PORT || 3095;
 
 async function start() {
-    await knew.raw('SELECT 1');
+    await knex.raw('SELECT 1');
     await connectMongo();
 
     app.listen(PORT, () => logger.info({port: PORT}, 'Server started'));

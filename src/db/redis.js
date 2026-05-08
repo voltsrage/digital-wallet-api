@@ -1,5 +1,5 @@
 import Redis from 'ioredis';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger.js';
 
 export const redis = new Redis(process.env.REDIS_URL, {
     retryStrategy(times){
