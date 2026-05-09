@@ -7,7 +7,6 @@ import {errorHandler} from './middleware/errorHandler.js';
 import { ApiResponse } from './utils/ApiResponse.js';
 import {swaggerRouter} from './swagger.js';
 
-
 export const app = express();
 
 // 1. Request logging — first so every request is captured, including those that fail body parsing
