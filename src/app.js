@@ -27,9 +27,10 @@ if (process.env.NODE_ENV !== 'production') {
 // Routes are mounted in later phases:
 import { authRouter } from './routes/auth.js';
 import { accountsRouter } from './routes/account.js';
+import { transfersRouter } from './routes/transfer.js';
 app.use('/api/v1/auth', authRouter);
 app.use('/api/v1/accounts', accountsRouter);
-// app.use('/api/v1/transfers', transfersRouter);
+app.use('/api/v1/transfers', transfersRouter);
 
 // 5. 404 catch-all — after all valid routes, before error handler
 app.use((req, res) => {
