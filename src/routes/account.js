@@ -1,5 +1,6 @@
 import { Router } from "express";
 import * as accountController from '../controllers/accountController.js';
+import * as ledgerController from '../controllers/ledgerController.js';
 import {authenticate} from '../middleware/authenticate.js';
 
 export const accountsRouter = Router();
@@ -270,3 +271,29 @@ accountsRouter.post('/:id/unfreeze', accountController.unfreezeAccount);
  *             schema: { $ref: '#/components/schemas/ErrorResponse' }
  */
 accountsRouter.post('/:id/close', accountController.closeAccount);
+
+/**
+ * @openapi
+ * /accounts/{id}/ledger:
+ *   get:
+ *     summary: Cursor-paginated ledger entries with running balance
+ *     tags: [Accounts]
+ *     parameters:
+ *       - { name: id,     in: path,  required: true, schema: { type: string } }
+ *       - { name: before, in: query, schema: { type: string }, description: Opaque cursor from previous response }
+ *       - { name: limit,  in: query, schema: { type: integer, default: 50, maximum: 100 } }
+ */
+accountsRouter.get('/:id/ledger', ledgerController.getLedger);
+
+/**
+ * @openapi
+ * /accounts/{id}/summary:
+ *   get:
+ *     summary: Daily aggregated spend and income over a date range
+ *     tags: [Accounts]
+ *     parameters:
+ *       - { name: id,   in: path,  required: true, schema: { type: string } }
+ *       - { name: from, in: query, schema: { type: string, format: date-time } }
+ *       - { name: to,   in: query, schema: { type: string, format: date-time } }
+ */
+accountsRouter.get(':/id/summary', ledgerController.getAccountSummary);
