@@ -5,6 +5,7 @@ import {connectMongo} from './db/mongo.js';
 import {redis} from './db/redis.js';
 import { logger } from './utils/logger.js';
 import {startOutboxPoller} from './services/outboxPoller.js';
+import { startReconciliationJob } from './services/reconciliationJob.js';
 
 
 const PORT =  process.env.PORT || 3095;
@@ -15,6 +16,7 @@ async function start() {
 
     if(process.env.NODE_ENV !== 'test'){
         startOutboxPoller();
+        startReconciliationJob();
     }
 
     app.listen(PORT, () => logger.info({port: PORT}, 'Server started'));
