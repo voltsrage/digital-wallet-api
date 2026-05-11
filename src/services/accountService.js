@@ -34,7 +34,7 @@ function assertTransition(current, next) {
 async function assertOwnership(accountId, userId) {
     const account = await knex('accounts').where({ id: accountId }).first();
     if (!account) throw new NotFoundError('Account not found.');
-    if (account.userId !== userId) throw new ForbiddenError('Access denied.');
+    if (account.user_id !== userId) throw new ForbiddenError('Access denied.');
     return account;
 }
 
@@ -107,25 +107,25 @@ export async function unfreezeAccount(userId, accountId) {
     const account = await assertOwnership(accountId, userId);
     assertTransition(account.status, 'active');
 
-    const [update] = await knex('accounts')
+    const [updated] = await knex('accounts')
         .where({id: accountId})
         .update({status: 'active', updated_at: knex.fn.now()})
         .returning('*');
-    
+
     await invalidateAccountCache(accountId);
 
     await AuditEvent.create({
-        eventType:  'ACCOUNT_FROZEN',
+        eventType:  'ACCOUNT_UNFROZEN',
         actorId:    userId,
         targetId:   accountId,
         targetType: 'account',
-        payload:    { previousStatus: 'active' },
+        payload:    { previousStatus: 'frozen' },
     });
 
     return toPublicAccount(updated);
 }
 
-export async function closeAccount(user, accountId){
+export async function closeAccount(userId, accountId){
     const account = await assertOwnership(accountId, userId);
     assertTransition(account.status, 'closed');
 

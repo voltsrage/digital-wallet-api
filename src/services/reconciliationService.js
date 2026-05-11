@@ -79,8 +79,10 @@ async function checkAccountBalances() {
         accountNumber: r.account_number,
         storedBalance: r.stored_balance,
         computedBalance: r.computed_balance,
-        difference: new Decimal(r.stored_balance).minus(r.computed_balance).toFixed(8)
-    }))
+        difference: new Decimal(r.stored_balance).minus(r.computed_balance).toFixed(8),
+    }));
+
+    return {discrepancies};
 }
 
 async function reportGlobalImbalance({totalCredits, totalDebits, net}){
@@ -123,7 +125,7 @@ async function reportAccountDiscrepancy({accountId, accountNumber, storedBalance
         {
             eventType: 'RECONCILIATION_FAILURE',
             'payload.accountId': accountId,
-            'payload.detectAt': {$gte: startOfDay()}
+            'payload.detectedAt': {$gte: startOfDay()},
         },
         {
             $setOnInsert: {
@@ -132,10 +134,11 @@ async function reportAccountDiscrepancy({accountId, accountNumber, storedBalance
                 targetId: accountId,
                 targetType: 'account',
                 payload: {accountId, accountNumber, storedBalance, computedBalance, difference, detectedAt: new Date()},
-                createdAt: new Date()
-            }
-        }
-    )
+                createdAt: new Date(),
+            },
+        },
+        {upsert: true},
+    );
 }
 
 // Returns midnight UTC today - used to prevent duplicate audit events

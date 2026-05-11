@@ -16,10 +16,10 @@ export async function getLedger(userId, accountId, {before, limit = '50'}){
     const cursorDate = before
         ? new Date(Buffer.from(before, 'base64url').toString('utf8'))
         : new Date();
-    
-        if(before && isNaN(cursorDate.getTime())) {
-            throw new ValidationError('Invalid cursor', 'INVALID_CURSOR');
-        }
+
+    if (before && isNaN(cursorDate.getTime())) {
+        throw new ValidationError('Invalid cursor', 'INVALID_CURSOR');
+    }
 
     // The window function computes a cumulative running balance ordered chronologically
     // over the filtered result set. Important: this matches balance_after exactly only
@@ -32,7 +32,7 @@ export async function getLedger(userId, accountId, {before, limit = '50'}){
             le.account_id,
             le.transfer_id,
             le.type,
-            le.amount::text AS amount
+            le.amount::text AS amount,
             le.balance_after::text AS balance_after,
             le.created_at,
             t.description,
@@ -41,11 +41,11 @@ export async function getLedger(userId, accountId, {before, limit = '50'}){
                 as running_balance
         FROM ledger_entries le
         JOIN transfers t on t.id = le.transfer_id
-        WHERE le.account_id = :account_id
+        WHERE le.account_id = :accountId
             AND le.created_at < :cursorDate
         ORDER BY le.created_at DESC
         LIMIT :limit
-        `, {accountId, cursorDate, limit: parsedLimit})
+        `, {accountId, cursorDate, limit: parsedLimit});
 
     // If the page is full, there may be more entries. Encode the oldest returned
     // entry's timestamp as the next cursor
@@ -84,7 +84,7 @@ export async function getAccountSummary(userId, accountId, {from, to}){
             DATE_TRUNC('day', created_at) AS day,
             COUNT(*)::int AS entry_count,
             COALESCE(SUM(amount) FILTER (WHERE type = 'credit'), 0) AS total_credits,
-            COALESCE(SUM(amount) FILTER (WHERE type = 'debit), 0) as total_debits,
+            COALESCE(SUM(amount) FILTER (WHERE type = 'debit'), 0) as total_debits,
             SUM(CASE WHEN type = 'credit' THEN amount ELSE -amount END) as net
         FROM ledger_entries
         WHERE account_id = :accountId

@@ -27,12 +27,15 @@ const auditEventSchema = new mongoose.Schema({
         'ACCOUNT_UNFROZEN',
         'ACCOUNT_CLOSED',
         'TRANSFER_COMPLETED',
+        'TRANSFER_DEBIT',
+        'TRANSFER_CREDIT',
         'TRANSFER_FAILED',
         'TRANSFER_REVERSED',
         'LOGIN_SUCCESS',
         'LOGIN_FAILED',
         'LOGIN_LOCKED',
         'RECONCILIATION_FAILURE',
+        'GLOBAL_LEDGER_IMBALANCE',
       ],
     },
     actorId: {type: String, required: true},   // userId or "system"
@@ -40,7 +43,7 @@ const auditEventSchema = new mongoose.Schema({
     targetType: {
         type: String,
         required: true,
-        enum: ['account', 'transfer', 'user']
+        enum: ['account', 'transfer', 'user', 'ledger']
     },
     payload: {type: mongoose.Schema.Types.Mixed, required: true}, // full snapshot at event time
     ipAddress: {type: String, default: null},

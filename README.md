@@ -19,6 +19,7 @@ A production-quality fintech backend for managing user accounts, processing mone
 - **Audit Trail** — append-only MongoDB documents enforced immutable at the application layer via Mongoose middleware hooks; no update or delete path exists
 - **Fraud Detection** — three-layer architecture: Redis pre-transfer gates → daily volume check inside the SERIALIZABLE transaction → async fraud scorer writing to MongoDB; five signal types with tiered risk scoring
 - **Admin Role** — `role` column on `users`; `requireAdmin` middleware does a live DB lookup on each admin request so role changes take effect immediately without requiring re-login
+- **Reconciliation** — nightly background job verifying two invariants: (1) global ledger net is zero (all credits minus all debits = 0); (2) every account's stored balance matches the sum of its ledger entries; writes `GLOBAL_LEDGER_IMBALANCE` / `RECONCILIATION_FAILURE` audit events as daily-deduped upserts; logs at `fatal` level for monitoring
 - **Structured Logging** — Pino with per-request correlation IDs; `userId`, `accountId`, `transferId` as structured fields
 - **API Docs** — Swagger UI at `/swagger` (development only)
 
@@ -117,7 +118,9 @@ src/
 │   ├── ledgerService.js           # Cursor-paginated ledger + daily summary aggregates
 │   ├── fraudSignal.service.js     # Async fraud scorer: signal evaluation + risk scoring
 │   ├── outboxPoller.js            # Background poller — FOR UPDATE SKIP LOCKED every 5 s
-│   └── outboxHandlers.js          # Writes receipts, audit events, and fraud signals to MongoDB
+│   ├── outboxHandlers.js          # Writes receipts, audit events, and fraud signals to MongoDB
+│   ├── reconciliationService.js   # Two-check invariant verification: global net + per-account balance
+│   └── reconciliationJob.js       # Scheduler — once per day in production; RECONCILIATION_INTERVAL_MS overrides
 ├── middleware/
 │   ├── authenticate.js            # JWT verification for HTTP routes
 │   ├── requireAdmin.js            # Live DB role check — role changes effective immediately
@@ -134,6 +137,8 @@ src/
 │   └── logger.js                  # Pino instance
 └── seed/
     └── seed.js                    # Development seed data
+tests/
+└── unit/                          # Jest unit tests; dependencies mocked with jest.unstable_mockModule
 migrations/
 ├── 20260507020548_create_users.js
 ├── 20260507020614_create_accounts.js
@@ -198,6 +203,17 @@ Knex is used as a query builder, not a full ORM. For financial logic, understand
 
 Access tokens are short-lived (15 min) and verified by signature — no database lookup per request. Refresh tokens are stored in Redis and revocable. On each refresh, the old token is deleted and a new one is issued, limiting the exposure window if a token is intercepted.
 
+### Reconciliation — Two-Invariant Design
+
+The reconciliation job verifies two properties that must always hold:
+
+1. **Global net is zero** — the sum of every credit minus every debit across all ledger entries must equal `0`. A non-zero net means money was created or destroyed somewhere in the system.
+2. **Per-account balance consistency** — for every account, the stored `accounts.balance` column must equal the ledger sum (`SUM(credits) - SUM(debits)` for that account). A mismatch means the account column diverged from the immutable ledger record.
+
+Both failures are handled the same way: log at `logger.fatal()` (surfaces as a critical alert in any structured log pipeline) and write a daily-deduped audit event via `$setOnInsert` upsert so that a job that runs multiple times in one day does not produce duplicate records.
+
+The job runs once per day in production (`RECONCILIATION_INTERVAL_MS` defaults to `86400000`). Setting `RECONCILIATION_INTERVAL_MS=60000` in development runs it every minute. A mutex flag (`isRunning`) prevents overlapping runs if a previous check is still executing.
+
 ### Admin Role — Live DB Lookup
 
 The `requireAdmin` middleware fetches the user's role from PostgreSQL on every admin request rather than embedding it in the JWT. This means role changes (grant or revoke) take effect immediately without requiring the user to log out. The cost is one extra query per admin call — acceptable given how rarely admin endpoints are called.
@@ -240,6 +256,9 @@ JWT_SECRET=change-me-in-production
 JWT_REFRESH_SECRET=another-secret-change-me-in-production
 LOG_LEVEL=info
 PORT=3095
+# Optional: override reconciliation interval (ms). Default 86400000 (once per day).
+# Set to 60000 in development to run every minute.
+# RECONCILIATION_INTERVAL_MS=60000
 ```
 
 ### Migrate
@@ -265,6 +284,14 @@ npm start
 ```
 
 API docs available at `http://localhost:3095/swagger` (development only).
+
+### Test
+
+```bash
+npm test
+```
+
+Unit tests live in `tests/unit/`. Jest is configured for ESM via `--experimental-vm-modules`. All infrastructure dependencies (PostgreSQL, MongoDB, Redis) are mocked at the module level with `jest.unstable_mockModule`, so no running services are required.
 
 ---
 
@@ -436,12 +463,13 @@ createdAt           Date
 **AuditEvent** *(immutable — application enforces no updates or deletes)*
 ```
 eventType   String  enum: ACCOUNT_CREATED | ACCOUNT_FROZEN | ACCOUNT_UNFROZEN |
-                          ACCOUNT_CLOSED | TRANSFER_COMPLETED | TRANSFER_FAILED |
-                          TRANSFER_REVERSED | LOGIN_SUCCESS | LOGIN_FAILED |
-                          LOGIN_LOCKED | RECONCILIATION_FAILURE
+                          ACCOUNT_CLOSED | TRANSFER_COMPLETED | TRANSFER_DEBIT |
+                          TRANSFER_CREDIT | TRANSFER_FAILED | TRANSFER_REVERSED |
+                          LOGIN_SUCCESS | LOGIN_FAILED | LOGIN_LOCKED |
+                          RECONCILIATION_FAILURE | GLOBAL_LEDGER_IMBALANCE
 actorId     String  userId or "system"
 targetId    String  accountId, transferId, or userId
-targetType  String  account | transfer | user
+targetType  String  account | transfer | user | ledger
 payload     Mixed   full snapshot at event time
 ipAddress   String  nullable
 userAgent   String  nullable
@@ -498,12 +526,12 @@ MongoDB writes are idempotent upserts (`$setOnInsert`) — if the poller process
 | 7 | Transaction ledger endpoint — cursor pagination, SQL window function running balance, daily account summary |
 | 8 | Fraud detection — transfer velocity gate, daily volume check, VELOCITY / LARGE_AMOUNT / NEW_RECIPIENT async signals |
 | 8b | Layered fraud signals — IP login velocity, new beneficiary gate, DESTINATION_FUNNEL / RECENT_PASSWORD_RESET signals, expanded risk tiers (allow/review/hold/block), admin role + fraud signal endpoint |
+| 9 | Nightly reconciliation job — global ledger net check + per-account balance verification; `GLOBAL_LEDGER_IMBALANCE` / `RECONCILIATION_FAILURE` audit events; unit test suite (Jest, ESM, module-level mocks) |
 
 ## Roadmap
 
 | Phase | Feature |
 |---|---|
-| 9 | Nightly reconciliation job — ledger balance invariant verification |
 | 10 | Health checks — liveness + readiness (PostgreSQL + MongoDB + Redis) |
 | 11 | Docker Compose + Nginx |
 | 12 | CI/CD pipeline |

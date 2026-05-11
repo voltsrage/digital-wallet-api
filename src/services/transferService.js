@@ -25,12 +25,11 @@ export async function initiateTransfer({userId, fromAccountId, toAccountId, amou
             .where('accounts.id', fromAccountId)
             .select('accounts.*', 'users.display_name as user_display_name')
             .first(),
-        knex('accounts'
-            .join('users', 'accounts.user_id', 'user.id')
+        knex('accounts')
+            .join('users', 'accounts.user_id', 'users.id')
             .where('accounts.id', toAccountId)
-            .select('accounts.*','users.display_name as user_display_name')
+            .select('accounts.*', 'users.display_name as user_display_name')
             .first(),
-        )
     ]);
 
     if (!fromAccount) throw new NotFoundError('Source account not found.');
@@ -68,7 +67,7 @@ export async function initiateTransfer({userId, fromAccountId, toAccountId, amou
     catch(err){
         // A unique violation on idempotency key means two concurrent requests raced past
         // the SELECT check. Find and return the existing transfer rather than failing
-        if(err.code === PG_UNIQUE_VIOLATION && err.constraint === 'idx_transfer_idempotency'){
+        if(err.code === PG_UNIQUE_VIOLATION && err.constraint === 'idx_transfers_idempotency'){
             const existing = await knex('transfers')
                 .where({idempotency_key: idempotencyKey})
                 .first();
@@ -131,7 +130,7 @@ async function executeTransfer({fromAccount, toAccount, amount, currency, descri
         // Runs inside the SERIALIZABLE transaction with the account row locked - the
         // result is exact and cannot be invalidated by a concurrent transfer
         const {rows: [volumeRow]}= await trx.raw(`
-            SELECT COALESCE(SUM(amount), o) as daily_debit_total
+            SELECT COALESCE(SUM(amount), 0) as daily_debit_total
             FROM ledger_entries
             WHERE account_id = :accountId
                 AND type = 'debit'
@@ -153,7 +152,7 @@ async function executeTransfer({fromAccount, toAccount, amount, currency, descri
             .update({
                 balance: newSrcBalance.toFixed(8),
                 version: trx.raw('version + 1'),
-                updated_at: trx.fn.now
+                updated_at: trx.fn.now(),
             });
 
         await trx('accounts')
@@ -161,7 +160,7 @@ async function executeTransfer({fromAccount, toAccount, amount, currency, descri
             .update({
                 balance: newDestBalance.toFixed(8),
                 version: trx.raw('version +1'),
-                updated_at: knex.fn.now()
+                updated_at: trx.fn.now(),
             });
 
         // Step 7 - Insert the transfer record
@@ -216,7 +215,7 @@ async function executeTransfer({fromAccount, toAccount, amount, currency, descri
                 toUserDisplayName: toAccount.user_display_name ?? 'Unknown',
                 amount: amount.toFixed(8),
                 currency,
-                description: des ?? null,
+                description: description ?? null,
                 ipAddress: ipAddress ?? null,
                 userAgent: userAgent ?? null
             })
@@ -230,15 +229,16 @@ export async function getTransfer(userId, transferId){
     // Join both account owners to verify the requesting user is a party to the transfer
 
     const transfer = await knex('transfers')
-        .where('transfer.id', transferId)
         .join('accounts as from_acc', 'transfers.from_account_id', 'from_acc.id')
         .join('accounts as to_acc', 'transfers.to_account_id', 'to_acc.id')
+        .where('transfers.id', transferId)
         .select(
             'transfers.*',
-        'from_acc.user_id as from_user_id',
-        'to_acc.user_id as to_user_id',
-        'from_acc.account_number as from_account_number',
-        'to_acc.account_number as from_account_number')
+            'from_acc.user_id as from_user_id',
+            'to_acc.user_id as to_user_id',
+            'from_acc.account_number as from_account_number',
+            'to_acc.account_number as to_account_number',
+        )
         .first();
 
     if(!transfer) throw new NotFoundError('Transfer not found.');
@@ -246,7 +246,7 @@ export async function getTransfer(userId, transferId){
     if(transfer.from_user_id !== userId && transfer.to_user_id !== userId)
         throw new ForbiddenError('Access denied');
 
-    const entries = await knew('ledger_entries')
+    const entries = await knex('ledger_entries')
         .where({transfer_id: transferId})
         .orderBy('type', 'asc');
 
@@ -283,24 +283,24 @@ function validateInput({fromAccountId, toAccountId, rawAmount, idempotencyKey}){
 function toPublicTransfer(t) {
     return {
         id: t.id,
-        fromAccountId: t.fromAccountId,
-        toAccountId: t.toAccountId,
+        fromAccountId: t.from_account_id ?? t.fromAccountId,
+        toAccountId: t.to_account_id ?? t.toAccountId,
         amount: String(t.amount),
         currency: t.currency,
         description: t.description,
         status: t.status,
-        idempotencyKey: t.idempotencyKey,
-        createdAt: t.created_at
+        idempotencyKey: t.idempotency_key ?? t.idempotencyKey,
+        createdAt: t.created_at ?? t.createdAt,
     };
 }
 
 function toPublicEntry(e){
     return {
         id: e.id,
-        accountId: e.accountId,
+        accountId: e.account_id ?? e.accountId,
         type: e.type,
         amount: String(e.amount),
-        balanceAfter: String(e.balance_after),
-        createdAt: e.created_at
+        balanceAfter: String(e.balance_after ?? e.balanceAfter),
+        createdAt: e.created_at ?? e.createdAt,
     };
 }

@@ -20,7 +20,7 @@ export function startOutboxPoller(){
     return interval;
 }
 
-async function pollOnce(){
+export async function pollOnce(){
     try{
         await knex.transaction(async (trx) => {
             // FOR UPDATE SKIP LOCKED: atomically lock this batch and skip any ros

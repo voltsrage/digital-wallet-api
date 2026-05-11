@@ -1,4 +1,5 @@
 import {redis} from '../db/redis.js';
+import {knex} from '../db/knex.js';
 import {TooManyRequestsError} from '../errors/AppError.js';
 
 const TRANSFER_COUNT_LIMIT = 20;
@@ -85,10 +86,10 @@ export async function checkNewBeneficiaryVelocity(userId, toAccountId){
     const prior = await knex('transfers')
         .join('accounts as from_acc', 'transfers.from_account_id', 'from_acc.id')
         .where('from_acc.user_id', userId)
-        .where('transfer.to_account_id', toAccountId)
+        .where('transfers.to_account_id', toAccountId)
         .where('transfers.status', 'completed')
         .count('transfers.id as count')
-        .first()
+        .first();
 
     const isNew = parseInt(prior?.count ?? '0', 10) === 0;
     if(!isNew) return; // known recipient - no check needed
@@ -97,10 +98,10 @@ export async function checkNewBeneficiaryVelocity(userId, toAccountId){
     const count = await redis.incr(key);
     if(count === 1) await redis.expire(key, NEW_BENEFICIARY_WINDOW);
 
-    if(count > 0){
+    if(count > NEW_BENEFICIARY_LIMIT) {
         throw new TooManyRequestsError(
             `Too many new recipients. Maximum ${NEW_BENEFICIARY_LIMIT} new recipients per 10 minutes.`,
-            'NEW_BENEFICIARY_RATE_LIMIT' 
+            'NEW_BENEFICIARY_RATE_LIMIT',
         );
     }
 }

@@ -39,7 +39,7 @@ export async function validateRefreshToken(token) {
     const exists = await redis.exists(`refresh:${payload.sub}:${payload.jti}`);
     if(!exists) return null;
 
-    return {userId: payload.sub, token: payload.jti};
+    return {userId: payload.sub, tokenId: payload.jti};
 }
 
 export async function revokeRefreshToken(userId, tokenId) {
