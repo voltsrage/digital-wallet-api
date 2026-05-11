@@ -1,5 +1,6 @@
 import {TransactionReceipt} from '../models/TransactionReceipt.js';
 import {AuditEvent} from '../models/AuditEvent.js';
+import { computeAndWriteFraudSignal } from './fraudSignal.service.js';
 import {logger} from '../utils/logger.js';
 
 export async function handleTransferCompleted(payload){
@@ -42,7 +43,8 @@ export async function handleTransferCompleted(payload){
             payload: {transferId, amount, currency, toAccountId, description},
             ipAddress, 
             userAgent
-        })
+        }),
+        computeAndWriteFraudSignal({transferId, fromAccountId, toAccountId, fromUserId, amount})
     ]);
 
     logger.info({transferId}, 'MongoDB writes completed for TRANSFER COMPLETED');

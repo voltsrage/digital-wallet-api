@@ -1,5 +1,7 @@
 import * as transferService from '../services/transferService.js';
 import {ApiResponse} from '../utils/ApiResponse.js';
+import { FraudSignal } from "../models/FraudSignal.js";
+import {TransactionReceipt} from '../models/TransactionReceipt.js';
 
 export async function initiateTransfer(req, res){
     const {fromAccountId, toAccountId, amount, currency, description, idempotencyKey} = req.body;
@@ -20,6 +22,25 @@ export async function initiateTransfer(req, res){
 }
 
 export async function getTransfer(req, res){
-    const result = await getTransfer(req.user.sub, req.params.id);
+    const result = await transferService.getTransfer(req.user.sub, req.params.id);
     res.json(ApiResponse.success(result));
+}
+
+export async function fraudSignalGetOne(req, res){
+    const signal = await FraudSignal.findOne({transferId: req.params.id}).lean();
+    if(!signal)
+        return res.status(404).json(ApiResponse.error('Fraud signal not found.', 'NOT_FOUND', 404));
+
+    res.json(ApiResponse.success(signal));
+}
+
+export async function getTransactionReceipt(req, res){
+    // Verify the requesting user is a party to the transfer (reuse existing service)
+    await transferService.getTransfer(req.user.sub, req.params.id); // throws Forbidden / NotFoundError if not authorized
+
+    const receipt = await TransactionReceipt.findOne({transferId: req.params.id}).lean();
+    if(!receipt)
+        return res.status(404).json(ApiResponse.error('Receipt not found', 'NOT_FOUND', 404));
+
+    res.json(ApiResponse.success(receipt));
 }

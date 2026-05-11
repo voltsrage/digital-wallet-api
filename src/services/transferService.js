@@ -9,7 +9,8 @@ import {
 }
 from '../errors/AppError.js';
 import {withSerializableRetry, PG_UNIQUE_VIOLATION} from '../utils/withSerializableRetry.js';
-import { validate } from "uuid";
+import { checkTransactionVelocity } from "../utils/velocityCheck.js";
+
 
 export async function initiateTransfer({userId, fromAccountId, toAccountId, amount: rawAmount, currency, description, idempotencyKey, ipAddress, userAgent}){
     validateInput({fromAccountId, toAccountId, rawAmount, idempotencyKey});
@@ -42,6 +43,10 @@ export async function initiateTransfer({userId, fromAccountId, toAccountId, amou
     if(fromAccount.currency !== currency || toAccount.currency !== currency){
         throw new ValidationError('Transfer currency must match both account currencies', 'CURRENCY_MISMATCH');
     };
+
+    // Pre-transaction: Redis velocity check. Fires before any PostgreSQL work.
+    // Increment-then-check so failed transfers count against the limit
+    await checkTransactionVelocity(userId);
 
     try{
         const result = await withSerializableRetry(() =>
@@ -120,6 +125,25 @@ async function executeTransfer({fromAccount, toAccount, amount, currency, descri
 
         const newSrcBalance = srcBalance.minus(amount);
         const newDestBalance = destBalance.plus(amount);
+
+        // Daily volume check: sum all debits from this account today.
+        // Runs inside the SERIALIZABLE transaction with the account row locked - the
+        // result is exact and cannot be invalidated by a concurrent transfer
+        const {rows: [volumeRow]}= await trx.raw(`
+            SELECT COALESCE(SUM(amount), o) as daily_debit_total
+            FROM ledger_entries
+            WHERE account_id = :accountId
+                AND type = 'debit'
+                AND created_at >= DATE_TRUNC('day', NOW() AT TIME ZONE 'UTC')
+            `, {accountId: src.id});
+
+        
+        const dailyDebits = new Decimal(volumeRow.daily_debit_total);
+        if(dailyDebits.plus(amount).greaterThan(src.daily_limit)) {
+            throw new ValidationError(`
+                Daily transfer limit of ${src.daily_limit} would be exceeded. Used today: ${dailyDebits.toFixed(2)}.
+                `, 'DAILY_LIMIT_EXCEEDED')
+        }
 
         // Steps 5 & 6 - Update the balances and increment version counters atomically
         // Version increment enables optimistic locking detection in the reconciliation jon.
