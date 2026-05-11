@@ -9,7 +9,7 @@ import {
 }
 from '../errors/AppError.js';
 import {withSerializableRetry, PG_UNIQUE_VIOLATION} from '../utils/withSerializableRetry.js';
-import { checkTransactionVelocity } from "../utils/velocityCheck.js";
+import { checkTransactionVelocity, checkNewBeneficiaryVelocity } from "../utils/velocityCheck.js";
 
 
 export async function initiateTransfer({userId, fromAccountId, toAccountId, amount: rawAmount, currency, description, idempotencyKey, ipAddress, userAgent}){
@@ -47,6 +47,7 @@ export async function initiateTransfer({userId, fromAccountId, toAccountId, amou
     // Pre-transaction: Redis velocity check. Fires before any PostgreSQL work.
     // Increment-then-check so failed transfers count against the limit
     await checkTransactionVelocity(userId);
+    await checkNewBeneficiaryVelocity(userId, toAccountId);
 
     try{
         const result = await withSerializableRetry(() =>

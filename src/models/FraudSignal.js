@@ -8,7 +8,7 @@ const fraudSignalSchema = new mongoose.Schema(
         decision: {
             type: String,
             required: true,
-            enum: ['allow', 'review', 'block']
+            enum: ['allow', 'review', 'block', 'hold']
         },
         // Each element has: type (string), severity (string), detail (Mixed).
         // detail varies by type — no fixed sub-schema is correct here.

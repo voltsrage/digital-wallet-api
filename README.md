@@ -6,12 +6,19 @@ A production-quality fintech backend for managing user accounts, processing mone
 
 - **Authentication** — JWT access tokens (15 min) + refresh tokens (7 days) stored in Redis with rotation on every use
 - **Account Lockout** — failed login attempts counted atomically per user; account locked for 30 minutes after 10 consecutive failures; `LOGIN_LOCKED` audit event written on trigger
+- **IP Velocity Check** — failed logins counted per IP in Redis (10 per 5 min); throws 429 before password comparison so timing reveals nothing about email validity; catches credential stuffing that never trips the per-account lockout
 - **Account Management** — open, view, freeze, unfreeze, and close accounts; status enforced as a state machine (`active → frozen → active`; `closed` is terminal)
 - **Money Transfers** — double-entry bookkeeping in a single `SERIALIZABLE` PostgreSQL transaction; deadlock prevention via consistent account lock ordering; idempotency key stored atomically inside the transfer transaction
+- **Transfer Velocity Gate** — Redis fixed-window counter (20 transfers / 10 min per user); enforced before any database work
+- **New Beneficiary Gate** — Redis counter limits new recipients to 3 per 10 minutes; known recipients (prior completed transfer exists) bypass the counter entirely; catches the account-takeover cash-out pattern
 - **Balance Caching** — Redis cache with 30-second TTL on account reads; explicitly invalidated on every balance-changing write
+- **Transaction Ledger** — cursor-paginated ledger entries with a SQL window function running balance; safe to query mid-history; `balance_after` is always the authoritative stored value
+- **Account Summary** — daily aggregated credits, debits, and net over a caller-specified date range; defaults to the last 30 days; `DATE_TRUNC` grouping with `FILTER` aggregates in a single pass
 - **Outbox Pattern** — MongoDB receipts and audit events written asynchronously via a background poller; survives process crashes between PostgreSQL commit and MongoDB write
 - **Transaction Receipts** — rich MongoDB documents with denormalized account metadata, device metadata, and flexible `Mixed` schema for extensible fields
 - **Audit Trail** — append-only MongoDB documents enforced immutable at the application layer via Mongoose middleware hooks; no update or delete path exists
+- **Fraud Detection** — three-layer architecture: Redis pre-transfer gates → daily volume check inside the SERIALIZABLE transaction → async fraud scorer writing to MongoDB; five signal types with tiered risk scoring
+- **Admin Role** — `role` column on `users`; `requireAdmin` middleware does a live DB lookup on each admin request so role changes take effect immediately without requiring re-login
 - **Structured Logging** — Pino with per-request correlation IDs; `userId`, `accountId`, `transferId` as structured fields
 - **API Docs** — Swagger UI at `/swagger` (development only)
 
@@ -31,10 +38,40 @@ HTTP request  → Express (routes → controllers → services)
                     │
                 Redis
           (balance cache, refresh
-           tokens, rate limits)
+           tokens, rate limits,
+           velocity counters)
 ```
 
 The core transfer flow is a single `SERIALIZABLE` PostgreSQL transaction. MongoDB writes happen after the commit via an outbox table — the outbox row is written inside the same transaction, so it is durable even if the process dies before the MongoDB write completes. The background poller reads unprocessed events with `FOR UPDATE SKIP LOCKED`, making it safe to run multiple poller instances concurrently.
+
+### Fraud Detection Layers
+
+```
+Incoming request
+      │
+      ▼
+Layer 1 — Hard gates (Redis, synchronous, before any DB work)
+  checkFailedLoginIpVelocity   ← auth path (10 failures / 5 min per IP)
+  checkTransferVelocity        ← transfer path (20 transfers / 10 min per user)
+  checkNewBeneficiaryVelocity  ← transfer path (3 new recipients / 10 min per user)
+      │ pass
+      ▼
+Layer 2 — PostgreSQL transaction
+  daily volume check           ← inside SERIALIZABLE trx
+      │ commit
+      ▼
+Layer 3 — Async fraud scorer (outbox handler → MongoDB FraudSignal)
+  VELOCITY             — transfers in the last 10-minute window
+  LARGE_AMOUNT         — transfer as % of daily limit (≥50% medium, ≥80% high)
+  NEW_RECIPIENT        — first-ever transfer to this destination
+  DESTINATION_FUNNEL   — many distinct senders to one recipient in 30 min (AML indicator)
+  RECENT_PASSWORD_RESET — transfer within 60 min of a password reset (account takeover)
+      │
+      ▼
+Risk score → allow (<30) / review (30–65) / hold (65–100) / block (≥100)
+```
+
+Layer 1 returns immediately without any PostgreSQL work. Layer 3 is the right place for checks that require joins, aggregates, or cross-document lookups too slow for the hot path.
 
 ## Tech Stack
 
@@ -63,23 +100,27 @@ src/
 ├── models/                        # Mongoose schemas (MongoDB)
 │   ├── TransactionReceipt.js      # Rich transfer metadata; unique index on transferId
 │   ├── AuditEvent.js              # Immutable audit log; hooks block all updates/deletes
-│   └── FraudSignal.js             # Variable-schema fraud assessment documents
+│   └── FraudSignal.js             # Per-transfer fraud assessment; unique index on transferId
 ├── routes/
 │   ├── auth.js                    # Auth endpoints
-│   ├── account.js                 # Account CRUD + state transitions
-│   └── transfer.js                # Transfer initiation + retrieval
+│   ├── account.js                 # Account CRUD + state transitions + ledger
+│   └── transfer.js                # Transfer initiation + retrieval + fraud signal
 ├── controllers/
 │   ├── authController.js          # Thin layer — delegates to services
 │   ├── accountController.js
-│   └── transferController.js
+│   ├── transferController.js
+│   └── ledgerController.js        # Ledger entries + account summary
 ├── services/
-│   ├── authService.js             # Register, login, refresh, logout + lockout logic
+│   ├── authService.js             # Register, login, refresh, logout + lockout + IP velocity
 │   ├── accountService.js          # Account CRUD, state machine, balance cache
 │   ├── transferService.js         # Core transfer: SERIALIZABLE tx, double-entry, idempotency
+│   ├── ledgerService.js           # Cursor-paginated ledger + daily summary aggregates
+│   ├── fraudSignal.service.js     # Async fraud scorer: signal evaluation + risk scoring
 │   ├── outboxPoller.js            # Background poller — FOR UPDATE SKIP LOCKED every 5 s
-│   └── outboxHandlers.js          # Writes receipts + audit events to MongoDB
+│   └── outboxHandlers.js          # Writes receipts, audit events, and fraud signals to MongoDB
 ├── middleware/
 │   ├── authenticate.js            # JWT verification for HTTP routes
+│   ├── requireAdmin.js            # Live DB role check — role changes effective immediately
 │   ├── correlationId.js           # Per-request UUID injected into all log lines
 │   └── errorHandler.js            # Global error handler → standard envelope
 ├── errors/
@@ -88,6 +129,7 @@ src/
 │   ├── ApiResponse.js             # Standard { success, statusCode, data, error } envelope
 │   ├── tokens.js                  # JWT sign/verify + refresh token Redis storage
 │   ├── balanceCache.js            # Redis balance cache (get / set / invalidate)
+│   ├── velocityCheck.js           # Redis velocity gates: transfer, new beneficiary, login IP
 │   ├── withSerializableRetry.js   # Retry wrapper for SERIALIZABLE serialization failures
 │   └── logger.js                  # Pino instance
 └── seed/
@@ -97,7 +139,9 @@ migrations/
 ├── 20260507020614_create_accounts.js
 ├── 20260507022112_create_transfers.js
 ├── 20260507022123_create_ledger_entries.js
-└── 20260507025618_create_outbox_events.js
+├── 20260507025618_create_outbox_events.js
+├── 20260511034625_add_role_to_users.js
+└── 20260511072453_add_password_reset_at_to_users.js
 ```
 
 ## Architecture Decisions
@@ -153,6 +197,14 @@ Knex is used as a query builder, not a full ORM. For financial logic, understand
 ### JWT with Refresh Token Rotation
 
 Access tokens are short-lived (15 min) and verified by signature — no database lookup per request. Refresh tokens are stored in Redis and revocable. On each refresh, the old token is deleted and a new one is issued, limiting the exposure window if a token is intercepted.
+
+### Admin Role — Live DB Lookup
+
+The `requireAdmin` middleware fetches the user's role from PostgreSQL on every admin request rather than embedding it in the JWT. This means role changes (grant or revoke) take effect immediately without requiring the user to log out. The cost is one extra query per admin call — acceptable given how rarely admin endpoints are called.
+
+### Cursor Pagination on the Ledger
+
+The ledger endpoint uses opaque base64url-encoded cursors (ISO timestamps) rather than `OFFSET`. `OFFSET n` requires the database to scan and discard the first `n` rows on every page — cost grows linearly with page depth. A cursor filters by `created_at < :cursor`, which uses the existing `(account_id, created_at DESC)` index directly.
 
 ---
 
@@ -235,7 +287,7 @@ Responses follow a standard envelope:
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | POST | `/auth/register` | — | Register user, returns access + refresh tokens |
-| POST | `/auth/login` | — | Login; increments failure counter, locks after 10 failures |
+| POST | `/auth/login` | — | Login; IP velocity check fires first; increments failure counter, locks after 10 failures |
 | POST | `/auth/refresh` | — | Rotate refresh token, return new token pair |
 | POST | `/auth/logout` | — | Revoke refresh token (idempotent — always 200) |
 
@@ -249,6 +301,22 @@ Responses follow a standard envelope:
 | POST | `/accounts/:id/freeze` | ✓ | Freeze account (`active → frozen`) |
 | POST | `/accounts/:id/unfreeze` | ✓ | Unfreeze account (`frozen → active`) |
 | POST | `/accounts/:id/close` | ✓ | Close account (`active/frozen → closed`); requires zero balance |
+| GET | `/accounts/:id/ledger` | ✓ | Cursor-paginated ledger entries with running balance |
+| GET | `/accounts/:id/summary` | ✓ | Daily aggregated credits/debits/net over a date range |
+
+**Ledger query parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `before` | string | now | Opaque cursor from the previous response's `nextCursor` |
+| `limit` | integer | 50 | Page size (max 100) |
+
+**Summary query parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `from` | ISO 8601 | 30 days ago | Start of the date range (inclusive) |
+| `to` | ISO 8601 | now | End of the date range (exclusive) |
 
 ### Transfers
 
@@ -256,6 +324,8 @@ Responses follow a standard envelope:
 |---|---|---|---|
 | POST | `/transfers` | ✓ | Initiate a transfer (idempotency key required) |
 | GET | `/transfers/:id` | ✓ | Get transfer details and associated ledger entries |
+| GET | `/transfers/:id/receipt` | ✓ | Get the MongoDB receipt for a completed transfer |
+| GET | `/transfers/:id/fraud-signal` | ✓ admin | Get the fraud signal document for a transfer |
 
 **Transfer request body:**
 
@@ -280,13 +350,15 @@ Responses follow a standard envelope:
 
 **users**
 ```
-id                UUID        PK, gen_random_uuid()
-email             VARCHAR     unique
-password_hash     VARCHAR     never returned in responses
-display_name      VARCHAR     nullable
-status            VARCHAR     active | locked | suspended
-failed_login_count INTEGER    default 0
-locked_until      TIMESTAMPTZ nullable
+id                  UUID        PK, gen_random_uuid()
+email               VARCHAR     unique
+password_hash       VARCHAR     never returned in responses
+display_name        VARCHAR     nullable
+status              VARCHAR     active | locked | suspended
+role                VARCHAR(20) default 'user'; 'admin' grants access to admin endpoints
+failed_login_count  INTEGER     default 0
+locked_until        TIMESTAMPTZ nullable
+password_reset_at   TIMESTAMPTZ nullable; written by the password-reset endpoint (Phase 9+)
 created_at / updated_at
 ```
 
@@ -378,6 +450,22 @@ createdAt   Date    indexed
 
 Indexes: `{ targetId, createdAt desc }`, `{ eventType, createdAt desc }`
 
+**FraudSignal** *(one document per transfer)*
+```
+transferId  String    unique — links to PostgreSQL transfers.id
+userId      String    sender's userId
+riskScore   Number    sum of signal weights; no cap (3 high = 120)
+decision    String    allow | review | hold | block
+signals     Array     [ { type, severity: low|medium|high, detail: Mixed } ]
+              signal types: VELOCITY | LARGE_AMOUNT | NEW_RECIPIENT |
+                            DESTINATION_FUNNEL | RECENT_PASSWORD_RESET
+createdAt   Date
+```
+
+Indexes: `{ transferId: 1 }` (unique), `{ userId: 1, createdAt: -1 }`
+
+Risk score weights: low=10, medium=25, high=40. Decision thresholds: allow <30, review 30–65, hold 65–100, block ≥100.
+
 ---
 
 ## Outbox Poller
@@ -407,13 +495,14 @@ MongoDB writes are idempotent upserts (`$setOnInsert`) — if the poller process
 | 4 | Account management + Redis balance caching with invalidation |
 | 5 | Money transfers — double-entry, SERIALIZABLE, deadlock prevention, idempotency |
 | 6 | Outbox pattern + MongoDB receipt and audit event writes |
+| 7 | Transaction ledger endpoint — cursor pagination, SQL window function running balance, daily account summary |
+| 8 | Fraud detection — transfer velocity gate, daily volume check, VELOCITY / LARGE_AMOUNT / NEW_RECIPIENT async signals |
+| 8b | Layered fraud signals — IP login velocity, new beneficiary gate, DESTINATION_FUNNEL / RECENT_PASSWORD_RESET signals, expanded risk tiers (allow/review/hold/block), admin role + fraud signal endpoint |
 
 ## Roadmap
 
 | Phase | Feature |
 |---|---|
-| 7 | Transaction ledger endpoint with SQL window functions + account summary |
-| 8 | Fraud signals — Redis velocity checks + async MongoDB fraud signal documents |
 | 9 | Nightly reconciliation job — ledger balance invariant verification |
 | 10 | Health checks — liveness + readiness (PostgreSQL + MongoDB + Redis) |
 | 11 | Docker Compose + Nginx |

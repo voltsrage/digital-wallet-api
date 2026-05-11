@@ -9,6 +9,10 @@ import {
     revokeRefreshToken
 }
 from '../utils/tokens.js';
+import {
+    checkFailedLoginIpVelocity,
+    recordFailedLoginIp
+} from '../utils/velocityCheck.js';
 
 const BCRYPT_ROUNDS = 12;
 const MAX_FAILURES = 10;
@@ -42,6 +46,11 @@ export async function register({email, password, displayName}){
 }
 
 export async function login({email, password, ipAddress, userAgent}){
+    // IP velocity check fires before the DB lookup - the attacker learns nothing
+    // from the timing of this rejection versus a valid email miss;
+
+    await checkFailedLoginIpVelocity(ipAddress);
+
     const user = await knex('users')
         .where({email})
         .select(
@@ -85,6 +94,9 @@ export async function login({email, password, ipAddress, userAgent}){
                 updated_at: knex.fn.now()
             })
             .returning([userColumns.failedLoginCount, userColumns.lockedUntil])
+
+        // New: IP-level Redis counter.
+        await recordFailedLoginIp(ipAddress);
 
         await AuditEvent.create({
             eventType: 'LOGIN_FAILED',
