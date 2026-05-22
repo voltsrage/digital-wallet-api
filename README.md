@@ -105,7 +105,8 @@ src/
 ├── routes/
 │   ├── auth.js                    # Auth endpoints
 │   ├── account.js                 # Account CRUD + state transitions + ledger
-│   └── transfer.js                # Transfer initiation + retrieval + fraud signal
+│   ├── transfer.js                # Transfer initiation + retrieval + fraud signal
+│   └── health.js                  # Liveness + readiness endpoints
 ├── controllers/
 │   ├── authController.js          # Thin layer — delegates to services
 │   ├── accountController.js
@@ -354,6 +355,27 @@ Responses follow a standard envelope:
 | GET | `/transfers/:id/receipt` | ✓ | Get the MongoDB receipt for a completed transfer |
 | GET | `/transfers/:id/fraud-signal` | ✓ admin | Get the fraud signal document for a transfer |
 
+### Health
+
+These endpoints are not prefixed with `/api/v1` and require no authentication. They are intended for load balancers and orchestrators.
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/health` | Liveness — `200` if the process is running |
+| GET | `/health/ready` | Readiness — checks PostgreSQL, MongoDB, and Redis; `503` if any fail |
+
+**Readiness response (healthy):**
+
+```json
+{ "status": "ok", "checks": { "postgres": "ok", "mongo": "ok", "redis": "ok" } }
+```
+
+**Readiness response (degraded):**
+
+```json
+{ "status": "degraded", "checks": { "postgres": "ok", "mongo": "error", "redis": "ok" } }
+```
+
 **Transfer request body:**
 
 ```json
@@ -527,12 +549,12 @@ MongoDB writes are idempotent upserts (`$setOnInsert`) — if the poller process
 | 8 | Fraud detection — transfer velocity gate, daily volume check, VELOCITY / LARGE_AMOUNT / NEW_RECIPIENT async signals |
 | 8b | Layered fraud signals — IP login velocity, new beneficiary gate, DESTINATION_FUNNEL / RECENT_PASSWORD_RESET signals, expanded risk tiers (allow/review/hold/block), admin role + fraud signal endpoint |
 | 9 | Nightly reconciliation job — global ledger net check + per-account balance verification; `GLOBAL_LEDGER_IMBALANCE` / `RECONCILIATION_FAILURE` audit events; unit test suite (Jest, ESM, module-level mocks) |
+| 10 | Health checks — `GET /health` liveness + `GET /health/ready` readiness (PostgreSQL + MongoDB + Redis); `503` on any dependency failure |
 
 ## Roadmap
 
 | Phase | Feature |
 |---|---|
-| 10 | Health checks — liveness + readiness (PostgreSQL + MongoDB + Redis) |
 | 11 | Docker Compose + Nginx |
 | 12 | CI/CD pipeline |
 | 13 | Git hygiene |
